@@ -1,26 +1,15 @@
 import asyncio
 import json
-import logging
+from time import sleep
 
 import aiofiles
 import aiohttp
 from bs4 import BeautifulSoup
 from selenium import webdriver
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 
-logger = logging.getLogger(__name__)
-
-# Пути к распрашенным данным
-PATH_PREVIEWS = './data/previews/'
-PATH_VIDEOS = './data/videos/'
-PATH_JSON = './data/jsons/'
-
-VIDEO_QUANTITY = 250  # Количество постов, которые нужно скачать
-SLEEP_TIME_SEC = 3  # Количество секунд, которое ждем после действия на странице, чтобы капчу не поймать
-COOKIES_USER = './data/my_cookies'  # Путь к файлу с куками
-
-with open(COOKIES_USER, 'r') as cookies:
-    cookies = dict(list(map(lambda x: x.split('\t')[:2], cookies.readlines())))
+from constants import *
 
 # Название блока в html страницы, в котором лежит инфа по видео
 CLASS_NAME_OF_POST_BLOCK = "tiktok-1soki6-DivItemContainerForSearch e19c29qe9"
@@ -57,7 +46,7 @@ async def setup_driver_tiktok(_cookies: dict) -> webdriver:
     return driver
 
 
-async def get_page_by_topic(topic: str, video_quantity: int, driver: webdriver) -> list[str]:
+def get_page_by_topic(topic: str, video_quantity: int, driver: webdriver) -> list[str]:
     """
     Идет в тикток, через открытие сафари. Парсит нужное количество "видео". Под каждым видео понимается
     блок с превью, автором, количеством лайков и прочими метаданными.
@@ -72,28 +61,33 @@ async def get_page_by_topic(topic: str, video_quantity: int, driver: webdriver) 
     url = f'https://www.tiktok.com/search?q={topic}'
     driver.get(url)
 
-    await asyncio.sleep(SLEEP_TIME_SEC)
+    sleep(SLEEP_TIME_SEC)
 
     page_topic = BeautifulSoup(driver.page_source, 'html.parser').find_all(class_=CLASS_NAME_OF_POST_BLOCK)
 
     # Пока не соберем нужное количество видео, будем скроллить страницу
     cnt_errs = 0
 
-    while len(page_topic) < video_quantity and cnt_errs < 3:
-        driver.execute_script("window.scrollTo(0,document.body.scrollHeight)")
-        await asyncio.sleep(SLEEP_TIME_SEC)
+    while len(page_topic) < video_quantity and cnt_errs < 100_000_000:
+        driver.execute_script("window.scrollTo(0,document.body.scrollHeight-10)")
+        sleep(SLEEP_TIME_SEC / 3)
 
         try:
-            driver.find_element(by=By.XPATH, value=XPATH_BUTTON).click()
-            await asyncio.sleep(SLEEP_TIME_SEC)
+            print('сейчас кликну по кнопке')
+            clickable = driver.find_element(by=By.XPATH, value=XPATH_BUTTON)
+            ActionChains(driver).move_to_element(clickable).click(clickable).double_click(clickable).perform()
+            print('кликнул по кнопке')
+
+            sleep(SLEEP_TIME_SEC / 3)
+
         except Exception as e:
             cnt_errs += 1
-            print(e)
+            print('блядская кнопка не работает', {e} | {cnt_errs})
 
             driver.execute_script("window.scrollTo(0,window.pageYOffset-30)")
             driver.execute_script("window.scrollTo(0,window.pageYOffset+30)")
 
-            await asyncio.sleep(SLEEP_TIME_SEC * 2)
+            sleep(SLEEP_TIME_SEC / 3)
 
         page_topic = BeautifulSoup(driver.page_source, 'html.parser').find_all(class_=CLASS_NAME_OF_POST_BLOCK)
 
@@ -144,43 +138,60 @@ async def get_info_from_post(post: dict[str], driver: webdriver) -> dict[str, st
     :param driver: Драйвер сафари.
     :return: Словарь с данными.
     """
-    link = post['post_link']
-    print(f'Идем в пост {link}')
 
-    # Преходим в ТикТок и ждем, пока загрузится страница;
-    driver.get(link)
-    await asyncio.sleep(SLEEP_TIME_SEC * 3)
+    try:
+        async with asyncio.TaskGroup() as tg:
+            link = post['post_link']
+            print(f'Идем в пост {link}')
 
-    # Парсим всю страницу. В ней найдем ссылку на видео, лайки, описание
-    page = BeautifulSoup(driver.page_source, 'html.parser')
+            # Преходим в ТикТок и ждем, пока загрузится страница;
 
-    # Парсим лайки
-    likes = page.find(class_=CLASS_NAME_OF_LIKES_BLOCK).text
+            driver.get(link)
+            sleep(SLEEP_TIME_SEC)
+            page = BeautifulSoup(driver.page_source, 'html.parser')
 
-    # Парсим описание
-    description = page.find(class_=CLASS_NAME_OF_DESCRIPTION_BLOCK).text
+            # Парсим ссылку на видео
+            post['video_link'] = page.find_all(mediatype='video')[0].get('src')
+            # Парсим всю страницу. В ней найдем ссылку на видео, лайки, описание
 
-    # Парсим ник юзера
-    user_nickname = page.find(class_=CLASS_NAME_OF_AUTHOR_NICKNAME_BLOCK).text
+            # Парсим лайки
+            likes = page.find(class_=CLASS_NAME_OF_LIKES_BLOCK).text
 
-    # Парсим ссылку на видео
-    video_link = page.find(mediatype='video').get('src')
+            # Парсим описание
+            description = page.find(class_=CLASS_NAME_OF_DESCRIPTION_BLOCK).text
 
-    # Скачиваем превью
-    preview_path = f'./{PATH_PREVIEWS}/{link.split("/")[-1]}.jpg'
-    await download_data(post['preview_link'], preview_path)
+            # Парсим ник юзера
+            user_nickname = page.find(class_=CLASS_NAME_OF_AUTHOR_NICKNAME_BLOCK).text
 
-    # Скачиваем видео
-    video_path = f'{PATH_VIDEOS}/video-{link.split("/")[-1]}.mp4'
-    await download_data(video_link, video_path)
+            # Скачиваем превью
+            preview_path = f'{PATH_PREVIEWS}/{link.split("/")[-1]}.jpg'
+            tg.create_task((download_data(post['preview_link'], preview_path)))
 
-    return {'likes': likes, 'description': description, 'user_nickname': user_nickname,
-            'video_path': video_path, 'preview_path': preview_path}
+            # Скачиваем видео
+            video_path = f'{PATH_VIDEOS}/video-{link.split("/")[-1]}.mp4'
+            tg.create_task(download_data(post['video_link'], video_path))
+
+        return {'likes': likes, 'description': description, 'user_nickname': user_nickname,
+                'video_path': video_path, 'preview_path': preview_path}
+
+    except Exception as e:
+        print(f'Ошибка в get_info_from_post: {e} для поста {post["post_link"]}')
+        return {}
 
 
-async def main(topic: str = 'datascience'):
+async def main(topic: str = 'datascience', video_quantity: int = 10) -> None:
+    """
+    Главная функция, которая запускает все остальные. Парсит данные по теме
+
+    :param topic: тема, по которой нужно собрать данные.
+    :param video_quantity: количество видео, которое нужно скачать.
+    :return: None
+    """
+    with open(COOKIES_USER, 'r') as cookies:
+        cookies = dict(list(map(lambda x: x.split('\t')[:2], cookies.readlines())))
     safari_driver = await setup_driver_tiktok(cookies)
-    full_video_window = await get_page_by_topic(topic, VIDEO_QUANTITY, driver=safari_driver)
+
+    full_video_window = get_page_by_topic(topic, video_quantity, driver=safari_driver)
 
     async with asyncio.TaskGroup() as tg:
         posts = []
@@ -189,22 +200,11 @@ async def main(topic: str = 'datascience'):
 
     # Пройдем по всем постам параллельно и соберем информацию. Используем gather, чтобы не ждать,
     # пока все посты обработаются
-    async with asyncio.TaskGroup() as _:
-        post_info = []
-        for group_index in range(0, len(posts), 10):
-            sub_posts = posts[group_index:group_index + 10]
-            post_info.extend(await asyncio.gather(*[get_info_from_post(post, safari_driver) for post in sub_posts]))
+    post_info = []
+    for group_index in range(0, len(posts), 10):
+        sub_posts = posts[group_index:group_index + 10]
+        post_info.extend(await asyncio.gather(*[get_info_from_post(post, safari_driver) for post in sub_posts]))
 
     posts = [dict(post, **info) for post, info in zip(posts, post_info)]
     json.dump(posts, open(f'{PATH_JSON}/posts-{topic}.json', 'w'), indent=4)
     safari_driver.close()
-
-    return posts
-
-
-if __name__ == '__main__':
-    import time
-
-    start = time.time()
-    print(asyncio.run(main()))
-    print(time.time() - start)
