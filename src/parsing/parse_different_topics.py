@@ -6,7 +6,7 @@ from constants import TOPICS
 
 async def main():
     for topic in TOPICS:
-        await tiktok_topic_parse.main(topic, 30)
+        await tiktok_topic_parse.main(topic, 20)
 
 
 if __name__ == '__main__':
